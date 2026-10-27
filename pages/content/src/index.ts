@@ -1,4 +1,12 @@
-import { replaceTextNodes, reverseVocabify, style, unstyle, updateToReplace, vocabify } from './vocabify';
+import {
+  discardOwnRecords,
+  replaceTextNodes,
+  restyle,
+  reverseVocabify,
+  setVocab,
+  startObserving,
+  stopObserving,
+} from './vocabify';
 import {
   domainSettingsStorage,
   translationSettingsStorage,
@@ -6,12 +14,7 @@ import {
   wanikaniSubjectStylePreferenceStorage,
 } from '@extension/storage';
 
-const observerOptions = {
-  childList: true,
-  subtree: true,
-};
-
-const observer = new MutationObserver(vocabify);
+let active = false;
 
 async function shouldTranslate(): Promise<boolean> {
   const currentDomain = window.location.hostname;
@@ -23,44 +26,44 @@ async function shouldTranslate(): Promise<boolean> {
   );
 }
 
-async function initialReplacement() {
-  await updateToReplace();
-  if (!(await shouldTranslate())) {
-    observer.disconnect();
-    return;
-  }
-  observer.observe(document.body, observerOptions);
-  replaceTextNodes(document.body);
+async function loadVocab() {
+  const [vocab, styled] = await Promise.all([vocabToReplaceStorage.get(), wanikaniSubjectStylePreferenceStorage.get()]);
+  setVocab(vocab.lookup, styled);
 }
 
-async function handleSettingsUpdate() {
-  if (!(await shouldTranslate())) {
-    observer.disconnect();
-    reverseVocabify();
-  } else {
-    observer.observe(document.body, observerOptions);
-    replaceTextNodes(document.body);
-  }
+function activate(refreshExisting: boolean) {
+  startObserving(document.body);
+  replaceTextNodes(document.body, refreshExisting);
+  discardOwnRecords();
+  active = true;
 }
 
-async function handleVocabUpdate() {
-  await updateToReplace();
-  if (!(await shouldTranslate())) return;
-  replaceTextNodes(document.body);
+function deactivate() {
+  stopObserving();
+  reverseVocabify();
+  active = false;
 }
 
-async function handleStylePreferenceUpdate() {
-  const stylePreference = await wanikaniSubjectStylePreferenceStorage.get();
-  if (stylePreference) {
-    style();
-  } else {
-    unstyle();
-  }
+async function sync(refreshExisting: boolean) {
+  if (await shouldTranslate()) activate(refreshExisting || active);
+  else if (active) deactivate();
 }
 
-// TODO figure out if we need to unsubscribe from the observer
-domainSettingsStorage.subscribe(handleSettingsUpdate);
-translationSettingsStorage.subscribe(handleSettingsUpdate);
-vocabToReplaceStorage.subscribe(handleVocabUpdate);
-wanikaniSubjectStylePreferenceStorage.subscribe(handleStylePreferenceUpdate);
-initialReplacement();
+async function init() {
+  await loadVocab();
+  await sync(false);
+}
+
+domainSettingsStorage.subscribe(() => sync(false));
+translationSettingsStorage.subscribe(() => sync(false));
+vocabToReplaceStorage.subscribe(async () => {
+  await loadVocab();
+  await sync(true);
+});
+wanikaniSubjectStylePreferenceStorage.subscribe(async () => {
+  restyle(await wanikaniSubjectStylePreferenceStorage.get());
+  discardOwnRecords();
+});
+
+if (document.body) init();
+else document.addEventListener('DOMContentLoaded', () => init(), { once: true });

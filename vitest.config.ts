@@ -2,7 +2,7 @@ import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
   test: {
-    workspace: ['packages/*'],
+    workspace: ['packages/*', 'pages/content'],
     coverage: {
       reporter: ['text', 'json-summary', 'json', 'html'],
       reportOnFailure: true,
