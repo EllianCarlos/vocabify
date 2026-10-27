@@ -1,14 +1,23 @@
-import type { SimplifiedVocab, VocabLookup } from '@extension/storage';
+import type { SimplifiedVocab, VocabEntry, VocabLookup } from '@extension/storage';
+import { readBlockText, type BlockText, sentenceAt } from './context';
 import { blockOf, isEnglishBlock } from './language';
 import { type Match, normalizeKey, PhraseMatcher } from './matcher';
+import { candidatesOf, type Decision, decide, type SenseContext } from './sense';
 
 /**
  * DOM side of Vocabify. This module has no runtime dependency on extension
- * storage, so it can be unit tested in a plain DOM environment.
+ * storage or messaging, so it can be unit tested in a plain DOM environment.
+ *
+ * A pass over the page has two steps:
+ *  1. Analysis (read only, can be async): find matches, check the language of
+ *     each block, and decide for each match which translation fits.
+ *  2. Change (synchronous): replace the text.
  */
 
 const SPAN_CLASS = 'vocabify';
+const PENDING_CLASS = 'vocabify-pending';
 const SUBJECT_TYPE_ATTR = 'data-vocabify-subject-type';
+const SUBJECT_ID_ATTR = 'data-vocabify-subject-id';
 
 /** Never change text inside these elements (or inside editable content). */
 const SKIP_TAGS = new Set([
@@ -35,13 +44,28 @@ const SKIP_SELECTOR = [...SKIP_TAGS, '[contenteditable]:not([contenteditable="fa
 
 const OBSERVER_OPTIONS: MutationObserverInit = { childList: true, subtree: true, characterData: true };
 
+/** A request to the word-sense model (option B). */
+export interface SenseRequest {
+  /** The sentence around the word, with original English words. */
+  sentence: string;
+  /** Where the word starts in `sentence`. */
+  start: number;
+  /** The word as it appears on the page. */
+  word: string;
+  candidates: { subjectId: number; texts: string[] }[];
+}
+
+/** Returns, for each request, the chosen subject id, or null to keep the English word. */
+export type SenseResolver = (requests: SenseRequest[]) => Promise<(number | null)[]>;
+
 interface State {
   matcher: PhraseMatcher;
-  lookup: Map<string, SimplifiedVocab>;
+  lookup: Map<string, VocabEntry>;
   styled: boolean;
 }
 
 let state: State = { matcher: new PhraseMatcher([]), lookup: new Map(), styled: true };
+let senseResolver: SenseResolver | null = null;
 
 let observer: MutationObserver | null = null;
 const pending = new Set<Node>();
@@ -55,7 +79,7 @@ let epoch = 0;
 
 /** Sets the vocabulary to show. Keys are English meanings. */
 export function setVocab(lookup: VocabLookup, styled: boolean) {
-  const normalized = new Map<string, SimplifiedVocab>();
+  const normalized = new Map<string, VocabEntry>();
   for (const [meaning, vocab] of Object.entries(lookup)) {
     normalized.set(normalizeKey(meaning), vocab);
   }
@@ -64,6 +88,11 @@ export function setVocab(lookup: VocabLookup, styled: boolean) {
 
 export function hasVocab(): boolean {
   return state.matcher.size > 0;
+}
+
+/** Sets the word-sense model client. With null, the first fitting translation is used. */
+export function setSenseResolver(resolver: SenseResolver | null) {
+  senseResolver = resolver;
 }
 
 // ---------------------------------------------------------------------------
@@ -95,21 +124,21 @@ function styleClasses(subjectType: string): [styled: string, plain: string] {
 function applyVocab(span: HTMLElement, vocab: SimplifiedVocab) {
   const oldType = span.getAttribute(SUBJECT_TYPE_ATTR);
   if (oldType !== null) span.classList.remove(...styleClasses(oldType));
+  span.classList.remove(PENDING_CLASS);
   const [styled, plain] = styleClasses(vocab.subjectType);
   span.classList.add(state.styled ? styled : plain);
   span.setAttribute(SUBJECT_TYPE_ATTR, vocab.subjectType);
+  span.setAttribute(SUBJECT_ID_ATTR, String(vocab.subjectId));
   span.setAttribute('data-vocabify', vocab.characters);
   span.setAttribute('data-vocabify-level', String(vocab.level));
   if (span.textContent !== vocab.characters) span.textContent = vocab.characters;
 }
 
-function createSpan(original: string, vocab: SimplifiedVocab): HTMLElement {
+function createSpan(original: string): HTMLElement {
   const span = document.createElement('span');
   span.classList.add(SPAN_CLASS);
   // The title keeps the original text and shows it as a tooltip.
   span.title = original;
-  span.lang = 'ja';
-  applyVocab(span, vocab);
   return span;
 }
 
@@ -119,22 +148,94 @@ function unwrap(span: HTMLElement) {
 
 /** Updates an existing span after the vocabulary changed. */
 function refreshSpan(span: HTMLElement) {
-  const vocab = state.lookup.get(normalizeKey(span.title));
-  if (vocab === undefined) unwrap(span);
-  else applyVocab(span, vocab);
+  if (span.classList.contains(PENDING_CLASS)) return;
+  const entry = state.lookup.get(normalizeKey(span.title));
+  if (entry === undefined) {
+    unwrap(span);
+    return;
+  }
+  // Keep the translation that was chosen for this place, if it still exists.
+  const id = Number(span.getAttribute(SUBJECT_ID_ATTR));
+  const candidates = candidatesOf(entry);
+  applyVocab(span, candidates.find(candidate => candidate.subjectId === id) ?? candidates[0]);
 }
 
-function replaceInTextNode(node: Text, known?: { text: string; matches: Match[] }) {
+// ---------------------------------------------------------------------------
+// Word-sense model requests
+// ---------------------------------------------------------------------------
+
+interface QueuedRequest {
+  request: SenseRequest;
+  span: HTMLElement;
+  candidates: SimplifiedVocab[];
+}
+
+let queue: QueuedRequest[] = [];
+
+function senseTexts(vocab: SimplifiedVocab): string[] {
+  const texts = [...(vocab.contextSentences ?? [])];
+  if (vocab.meanings?.length) texts.unshift(vocab.meanings.join(', '));
+  return texts;
+}
+
+async function sendQueue() {
+  const batch = queue;
+  queue = [];
+  if (batch.length === 0) return;
+  const startEpoch = epoch;
+  let results: (number | null)[];
+  try {
+    results = senseResolver ? await senseResolver(batch.map(item => item.request)) : [];
+  } catch (error) {
+    console.warn('Vocabify: the word-sense model is not available, so the first translation is used.', error);
+    results = batch.map(item => item.candidates[0].subjectId);
+  }
+  if (epoch !== startEpoch) return;
+  batch.forEach((item, i) => {
+    if (!item.span.isConnected || !item.span.classList.contains(PENDING_CLASS)) return;
+    const choice = item.candidates.find(candidate => candidate.subjectId === results[i]);
+    if (choice) applyVocab(item.span, choice);
+    else unwrap(item.span);
+  });
+  observer?.takeRecords();
+}
+
+// ---------------------------------------------------------------------------
+// Replacement
+// ---------------------------------------------------------------------------
+
+interface PlannedMatch {
+  match: Match;
+  decision: Decision;
+  context: SenseContext | null;
+}
+
+function replaceInTextNode(node: Text, planned: PlannedMatch[]) {
   const text = node.data;
-  const matches = known?.text === text ? known.matches : state.matcher.findAll(text);
-  if (matches.length === 0) return;
   const fragment = document.createDocumentFragment();
   let last = 0;
-  for (const match of matches) {
-    const vocab = state.lookup.get(match.key);
-    if (vocab === undefined) continue;
+  for (const { match, decision, context } of planned) {
+    if (decision.kind === 'skip') continue;
     if (match.start > last) fragment.appendChild(document.createTextNode(text.slice(last, match.start)));
-    fragment.appendChild(createSpan(match.text, vocab));
+    const span = createSpan(match.text);
+    if (decision.kind === 'replace') {
+      applyVocab(span, decision.vocab);
+    } else {
+      // Show the English word until the model answers.
+      span.classList.add(PENDING_CLASS);
+      span.textContent = match.text;
+      queue.push({
+        span,
+        candidates: decision.candidates,
+        request: {
+          sentence: context?.sentence ?? match.text,
+          start: context?.start ?? 0,
+          word: match.text,
+          candidates: decision.candidates.map(vocab => ({ subjectId: vocab.subjectId, texts: senseTexts(vocab) })),
+        },
+      });
+    }
+    fragment.appendChild(span);
     last = match.end;
   }
   if (last === 0) return;
@@ -142,17 +243,23 @@ function replaceInTextNode(node: Text, known?: { text: string; matches: Match[] 
   node.replaceWith(fragment);
 }
 
-// ---------------------------------------------------------------------------
-// Tree walking
-// ---------------------------------------------------------------------------
+function planMatches(text: Text, matches: Match[], blockText: BlockText | null): PlannedMatch[] {
+  const base = blockText?.offsets.get(text);
+  return matches.flatMap(match => {
+    const entry = state.lookup.get(match.key);
+    if (entry === undefined) return [];
+    const context = blockText && base !== undefined ? sentenceAt(blockText.text, base + match.start) : null;
+    return [{ match, context, decision: decide(entry, match.key, context, senseResolver !== null) }];
+  });
+}
 
 /**
  * Replaces vocabulary in all text below `root`. When `refreshExisting` is
  * true, spans that are already present are updated for the current vocab.
  *
  * Text is replaced only in blocks that are English (see language.ts). All
- * language checks finish before the DOM is changed, so the changes happen in
- * one synchronous step.
+ * checks finish before the DOM is changed, so the changes happen in one
+ * synchronous step.
  */
 export async function replaceTextNodes(root: Node, refreshExisting = false): Promise<void> {
   if (isInsideSkipped(root)) return;
@@ -183,12 +290,12 @@ export async function replaceTextNodes(root: Node, refreshExisting = false): Pro
     for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) texts.push(node as Text);
   }
 
-  // Only text that contains a match needs a language check.
-  const found = new Map<Text, { text: string; matches: Match[] }>();
+  // 1. Analysis. Only text that contains a match needs more work.
+  const found = new Map<Text, { data: string; matches: Match[] }>();
   if (hasVocab()) {
     for (const text of texts) {
       const matches = state.matcher.findAll(text.data);
-      if (matches.length > 0) found.set(text, { text: text.data, matches });
+      if (matches.length > 0) found.set(text, { data: text.data, matches });
     }
   }
   const blocks = new Map<Text, Element | null>([...found.keys()].map(text => [text, blockOf(text)]));
@@ -198,13 +305,27 @@ export async function replaceTextNodes(root: Node, refreshExisting = false): Pro
       if (block !== null) english.set(block, await isEnglishBlock(block));
     }),
   );
-
   if (epoch !== startEpoch) return;
-  if (refreshExisting) spans.filter(span => span.isConnected).forEach(refreshSpan);
-  for (const [text, known] of found) {
+
+  const blockTexts = new Map<Element, BlockText>();
+  const plans = new Map<Text, PlannedMatch[]>();
+  for (const [text, { data, matches }] of found) {
     const block = blocks.get(text);
-    if (block && english.get(block) && text.isConnected && !isInsideSkipped(text)) replaceInTextNode(text, known);
+    if (!block || !english.get(block) || !text.isConnected || text.data !== data) continue;
+    let blockText = blockTexts.get(block);
+    if (blockText === undefined) {
+      blockText = readBlockText(block);
+      blockTexts.set(block, blockText);
+    }
+    plans.set(text, planMatches(text, matches, blockText));
   }
+
+  // 2. Change the DOM.
+  if (refreshExisting) spans.filter(span => span.isConnected).forEach(refreshSpan);
+  for (const [text, planned] of plans) {
+    if (!isInsideSkipped(text)) replaceInTextNode(text, planned);
+  }
+  if (queue.length > 0) void sendQueue();
 }
 
 /** Removes every Vocabify span below `root` and restores the original text. */
@@ -270,11 +391,17 @@ export function stopObserving() {
   observer?.disconnect();
   observer = null;
   pending.clear();
+  queue = [];
 }
 
 /** Runs pending work now. Used by tests. */
 export function flushPending(): Promise<void> {
   return flush();
+}
+
+/** Waits until the model requests of the current pass are answered. Used by tests. */
+export async function settle(): Promise<void> {
+  for (let i = 0; i < 5; i++) await new Promise(resolve => setTimeout(resolve, 0));
 }
 
 /** Drops mutation records that our own synchronous changes created. */

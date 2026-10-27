@@ -19,7 +19,7 @@ import type {
   UserData,
   VocabularyResponse,
 } from '@extension/shared';
-import type { SubjectTypeSelection, SrsRange, SubjectIdMap, VocabLookup } from '@extension/storage';
+import type { SimplifiedVocab, SubjectTypeSelection, SrsRange, SubjectIdMap, VocabLookup } from '@extension/storage';
 
 /**
  * Helper function to get a subject from the appropriate lookup based on its type
@@ -124,15 +124,78 @@ export function escapeRegex(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+const SUBJECT_TYPE_PRIORITY: Record<SubjectType, number> = {
+  vocabulary: 0,
+  kana_vocabulary: 1,
+  kanji: 2,
+  radical: 3,
+};
+
 /**
- * Generates an optimized regex pattern for finding vocabulary in text
+ * Orders candidates for one English key, with the same rules as chooseVocab:
+ * lower SRS stage first, then vocabulary, kana vocabulary, kanji, radical.
+ * Ties use the subject id, so the order is stable.
  */
-function generateVocabRegex(originals: string[]): string | undefined {
-  if (originals.length === 0) return undefined;
-  // Sort by length in descending order to match longer words first
-  const sorted = [...originals].sort((a, b) => b.length - a.length);
-  // Escape special regex characters and join with | for alternation
-  return `\\b(${sorted.map(escapeRegex).join('|')})\\b`;
+export function compareVocab(a: VocabSrsStage, b: VocabSrsStage): number {
+  return (
+    a.srsStage - b.srsStage ||
+    SUBJECT_TYPE_PRIORITY[a.vocab.object] - SUBJECT_TYPE_PRIORITY[b.vocab.object] ||
+    a.vocab.id - b.vocab.id
+  );
+}
+
+function simplify(subject: VocabSrsStage, withContext: boolean): SimplifiedVocab {
+  const { data } = subject.vocab;
+  const vocab: SimplifiedVocab = {
+    subjectId: subject.vocab.id,
+    characters: data.characters!,
+    subjectType: subject.vocab.object,
+    srsStage: subject.srsStage,
+    level: data.level,
+  };
+  if ('parts_of_speech' in data && data.parts_of_speech.length > 0) vocab.partsOfSpeech = data.parts_of_speech;
+  if (withContext) {
+    vocab.meanings = data.meanings.map(meaning => meaning.meaning);
+    if ('context_sentences' in data) vocab.contextSentences = data.context_sentences.map(sentence => sentence.en);
+  }
+  return vocab;
+}
+
+/**
+ * Builds the lookup from English meaning to subjects. Every key keeps all its
+ * subjects with different characters: the first one is the default, and the
+ * others are alternatives that the content script can select by context.
+ */
+export function buildVocabLookup(vocab: VocabSrsStage[]): VocabLookup {
+  const byKey = new Map<string, VocabSrsStage[]>();
+  for (const subject of vocab) {
+    // TODO consider using the radical images if there are no characters
+    if (subject.vocab.data.characters === null) continue;
+    for (const meaning of subject.vocab.data.meanings) {
+      const key = meaning.meaning.toLowerCase();
+      const list = byKey.get(key);
+      if (list === undefined) byKey.set(key, [subject]);
+      else if (!list.includes(subject)) list.push(subject);
+    }
+  }
+
+  const lookup: VocabLookup = {};
+  for (const [key, subjects] of byKey) {
+    subjects.sort(compareVocab);
+    // Subjects with the same characters (for example the kanji and the
+    // vocabulary 一) are the same translation, so keep only the first.
+    const seen = new Set<string>();
+    const unique = subjects.filter(subject => {
+      const characters = subject.vocab.data.characters!;
+      if (seen.has(characters)) return false;
+      seen.add(characters);
+      return true;
+    });
+    const ambiguous = unique.length > 1;
+    const [first, ...rest] = unique.map(subject => simplify(subject, ambiguous));
+    lookup[key] = ambiguous ? { ...first, alternatives: rest } : first;
+  }
+  return lookup;
 }
 
 /**
@@ -140,8 +203,7 @@ function generateVocabRegex(originals: string[]): string | undefined {
  * This function:
  * 1. Filters assignments based on user preferences and SRS range
  * 2. Creates a lookup of vocabulary items by their meanings
- * 3. Generates a regex pattern for finding vocabulary in text
- * 4. Stores the results in vocabToReplaceStorage
+ * 3. Stores the results in vocabToReplaceStorage
  */
 export async function updateVocabToReplace() {
   const selectedSubjectType = await waniKaniSubjectTypeSelectionStorage.get();
@@ -153,10 +215,7 @@ export async function updateVocabToReplace() {
   const kanaVocabularyLookup = await kanaVocabularySubjectStorage.get();
 
   if (user === null) {
-    vocabToReplaceStorage.set({
-      regexString: undefined,
-      lookup: {},
-    });
+    vocabToReplaceStorage.set({ lookup: {} });
     return;
   }
 
@@ -190,30 +249,5 @@ export async function updateVocabToReplace() {
     });
   }
 
-  const intermediateLookup: { [key: string]: VocabSrsStage } = {};
-  for (const subject of vocab) {
-    // TODO consider using the radical images if there are no characters
-    if (subject.vocab.data.characters === null) continue;
-    for (const meaning of subject.vocab.data.meanings) {
-      const original: string = meaning.meaning.toLowerCase();
-      intermediateLookup[original] = chooseVocab(subject, intermediateLookup[original]);
-    }
-  }
-
-  const finalLookup: VocabLookup = {};
-  for (const [original, subject] of Object.entries(intermediateLookup)) {
-    // Only subjects with non-null characters are added to the intermediate lookup
-    finalLookup[original] = {
-      characters: subject.vocab.data.characters!,
-      subjectType: subject.vocab.object,
-      srsStage: subject.srsStage,
-      level: subject.vocab.data.level,
-    };
-  }
-
-  const regexString = generateVocabRegex(Object.keys(finalLookup));
-  vocabToReplaceStorage.set({
-    regexString,
-    lookup: finalLookup,
-  });
+  vocabToReplaceStorage.set({ lookup: buildVocabLookup(vocab) });
 }
