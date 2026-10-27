@@ -1,5 +1,6 @@
 import type { SimplifiedVocab, VocabLookup } from '@extension/storage';
-import { normalizeKey, PhraseMatcher } from './matcher';
+import { blockOf, isEnglishBlock } from './language';
+import { type Match, normalizeKey, PhraseMatcher } from './matcher';
 
 /**
  * DOM side of Vocabify. This module has no runtime dependency on extension
@@ -45,6 +46,8 @@ let state: State = { matcher: new PhraseMatcher([]), lookup: new Map(), styled: 
 let observer: MutationObserver | null = null;
 const pending = new Set<Node>();
 let flushScheduled = false;
+/** Changes when Vocabify is stopped, so unfinished async work is dropped. */
+let epoch = 0;
 
 // ---------------------------------------------------------------------------
 // State
@@ -121,9 +124,9 @@ function refreshSpan(span: HTMLElement) {
   else applyVocab(span, vocab);
 }
 
-function replaceInTextNode(node: Text) {
+function replaceInTextNode(node: Text, known?: { text: string; matches: Match[] }) {
   const text = node.data;
-  const matches = state.matcher.findAll(text);
+  const matches = known?.text === text ? known.matches : state.matcher.findAll(text);
   if (matches.length === 0) return;
   const fragment = document.createDocumentFragment();
   let last = 0;
@@ -146,44 +149,62 @@ function replaceInTextNode(node: Text) {
 /**
  * Replaces vocabulary in all text below `root`. When `refreshExisting` is
  * true, spans that are already present are updated for the current vocab.
+ *
+ * Text is replaced only in blocks that are English (see language.ts). All
+ * language checks finish before the DOM is changed, so the changes happen in
+ * one synchronous step.
  */
-export function replaceTextNodes(root: Node, refreshExisting = false) {
+export async function replaceTextNodes(root: Node, refreshExisting = false): Promise<void> {
   if (isInsideSkipped(root)) return;
-  if (root.nodeType === Node.TEXT_NODE) {
-    if (isVocabSpan(root.parentElement)) {
-      if (refreshExisting) refreshSpan(root.parentElement);
-      return;
-    }
-    if (hasVocab()) replaceInTextNode(root as Text);
-    return;
-  }
-  if (isVocabSpan(root)) {
-    if (refreshExisting) refreshSpan(root);
-    return;
-  }
-  if (root.nodeType !== Node.ELEMENT_NODE && root.nodeType !== Node.DOCUMENT_FRAGMENT_NODE) return;
-
+  const startEpoch = epoch;
   const texts: Text[] = [];
   const spans: HTMLElement[] = [];
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
-    acceptNode(node) {
-      if (node.nodeType === Node.TEXT_NODE) {
-        // Skip whitespace-only nodes quickly.
-        return /\S/.test((node as Text).data) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
-      }
-      const element = node as Element;
-      if (element.classList.contains(SPAN_CLASS)) {
-        spans.push(element as HTMLElement);
-        return NodeFilter.FILTER_REJECT;
-      }
-      return isSkippedElement(element) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_SKIP;
-    },
-  });
-  // Collect first, then change the DOM, so the walker is not affected.
-  for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) texts.push(node as Text);
 
-  if (refreshExisting) spans.forEach(refreshSpan);
-  if (hasVocab()) texts.forEach(replaceInTextNode);
+  if (root.nodeType === Node.TEXT_NODE) {
+    if (isVocabSpan(root.parentElement)) spans.push(root.parentElement);
+    else texts.push(root as Text);
+  } else if (isVocabSpan(root)) {
+    spans.push(root);
+  } else if (root.nodeType === Node.ELEMENT_NODE || root.nodeType === Node.DOCUMENT_FRAGMENT_NODE) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        if (node.nodeType === Node.TEXT_NODE) {
+          // Skip whitespace-only nodes quickly.
+          return /\S/.test((node as Text).data) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+        }
+        const element = node as Element;
+        if (element.classList.contains(SPAN_CLASS)) {
+          spans.push(element as HTMLElement);
+          return NodeFilter.FILTER_REJECT;
+        }
+        return isSkippedElement(element) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_SKIP;
+      },
+    });
+    for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) texts.push(node as Text);
+  }
+
+  // Only text that contains a match needs a language check.
+  const found = new Map<Text, { text: string; matches: Match[] }>();
+  if (hasVocab()) {
+    for (const text of texts) {
+      const matches = state.matcher.findAll(text.data);
+      if (matches.length > 0) found.set(text, { text: text.data, matches });
+    }
+  }
+  const blocks = new Map<Text, Element | null>([...found.keys()].map(text => [text, blockOf(text)]));
+  const english = new Map<Element, boolean>();
+  await Promise.all(
+    [...new Set(blocks.values())].map(async block => {
+      if (block !== null) english.set(block, await isEnglishBlock(block));
+    }),
+  );
+
+  if (epoch !== startEpoch) return;
+  if (refreshExisting) spans.filter(span => span.isConnected).forEach(refreshSpan);
+  for (const [text, known] of found) {
+    const block = blocks.get(text);
+    if (block && english.get(block) && text.isConnected && !isInsideSkipped(text)) replaceInTextNode(text, known);
+  }
 }
 
 /** Removes every Vocabify span below `root` and restores the original text. */
@@ -214,24 +235,23 @@ function collect(records: MutationRecord[]) {
   }
 }
 
-function flush() {
+async function flush() {
   flushScheduled = false;
   if (observer === null) return;
   collect(observer.takeRecords());
-  const nodes = [...pending];
+  const nodes = [...pending].filter(node => node.isConnected);
   pending.clear();
-  for (const node of nodes) {
-    if (node.isConnected) replaceTextNodes(node);
-  }
+  await Promise.all(nodes.map(node => replaceTextNodes(node)));
   // Drop the records that our own changes created.
-  observer.takeRecords();
+  observer?.takeRecords();
 }
 
 function scheduleFlush() {
   if (flushScheduled) return;
   flushScheduled = true;
-  if (typeof requestIdleCallback === 'function') requestIdleCallback(flush, { timeout: 200 });
-  else setTimeout(flush, 50);
+  const run = () => void flush();
+  if (typeof requestIdleCallback === 'function') requestIdleCallback(run, { timeout: 200 });
+  else setTimeout(run, 50);
 }
 
 /** Starts watching `root` for new text. Changes are batched. */
@@ -246,14 +266,15 @@ export function startObserving(root: Node = document.body) {
 }
 
 export function stopObserving() {
+  epoch++;
   observer?.disconnect();
   observer = null;
   pending.clear();
 }
 
 /** Runs pending work now. Used by tests. */
-export function flushPending() {
-  flush();
+export function flushPending(): Promise<void> {
+  return flush();
 }
 
 /** Drops mutation records that our own synchronous changes created. */

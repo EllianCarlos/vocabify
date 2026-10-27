@@ -7,6 +7,7 @@ import {
   startObserving,
   stopObserving,
 } from './vocabify';
+import { setLanguageDetector } from './language';
 import {
   domainSettingsStorage,
   translationSettingsStorage,
@@ -15,6 +16,9 @@ import {
 } from '@extension/storage';
 
 let active = false;
+
+// The browser's built-in language detector (CLD). It needs no download.
+setLanguageDetector(text => chrome.i18n.detectLanguage(text));
 
 async function shouldTranslate(): Promise<boolean> {
   const currentDomain = window.location.hostname;
@@ -31,11 +35,11 @@ async function loadVocab() {
   setVocab(vocab.lookup, styled);
 }
 
-function activate(refreshExisting: boolean) {
-  startObserving(document.body);
-  replaceTextNodes(document.body, refreshExisting);
-  discardOwnRecords();
+async function activate(refreshExisting: boolean) {
   active = true;
+  startObserving(document.body);
+  await replaceTextNodes(document.body, refreshExisting);
+  discardOwnRecords();
 }
 
 function deactivate() {
@@ -45,7 +49,7 @@ function deactivate() {
 }
 
 async function sync(refreshExisting: boolean) {
-  if (await shouldTranslate()) activate(refreshExisting || active);
+  if (await shouldTranslate()) await activate(refreshExisting || active);
   else if (active) deactivate();
 }
 

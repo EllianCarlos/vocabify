@@ -28,9 +28,9 @@ afterEach(() => {
 });
 
 describe('replaceTextNodes', () => {
-  it('replaces words with styled spans and keeps the original as title', () => {
+  it('replaces words with styled spans and keeps the original as title', async () => {
     document.body.innerHTML = '<p>One person and my Big Brother.</p>';
-    replaceTextNodes(document.body);
+    await replaceTextNodes(document.body);
     expect(document.body.textContent).toBe('一 人 and my 兄.');
     const [first, , third] = spans();
     expect(first.tagName).toBe('SPAN');
@@ -40,7 +40,7 @@ describe('replaceTextNodes', () => {
     expect(third.getAttribute('data-vocabify-level')).toBe('3');
   });
 
-  it('does not touch editable fields, code or scripts', () => {
+  it('does not touch editable fields, code or scripts', async () => {
     document.body.innerHTML = `
       <textarea>one</textarea>
       <input value="one">
@@ -50,26 +50,26 @@ describe('replaceTextNodes', () => {
       <script>var one = 1;</script>
       <style>.one {}</style>
       <svg><text>one</text></svg>`;
-    replaceTextNodes(document.body);
+    await replaceTextNodes(document.body);
     expect(spans()).toHaveLength(1);
     expect(spans()[0].parentElement?.getAttribute('contenteditable')).toBe('false');
     expect(document.querySelector('textarea')?.value).toBe('one');
     expect(document.querySelector('script')?.textContent).toBe('var one = 1;');
   });
 
-  it('does not process its own spans twice', () => {
+  it('does not process its own spans twice', async () => {
     document.body.innerHTML = '<p>one</p>';
-    replaceTextNodes(document.body);
-    replaceTextNodes(document.body);
+    await replaceTextNodes(document.body);
+    await replaceTextNodes(document.body);
     expect(spans()).toHaveLength(1);
     expect(document.body.textContent).toBe('一');
   });
 
-  it('updates and removes existing spans when the vocabulary changes', () => {
+  it('updates and removes existing spans when the vocabulary changes', async () => {
     document.body.innerHTML = '<p>one person</p>';
-    replaceTextNodes(document.body);
+    await replaceTextNodes(document.body);
     setVocab({ one: { characters: '壱', subjectType: 'vocabulary', srsStage: 1, level: 2 } }, true);
-    replaceTextNodes(document.body, true);
+    await replaceTextNodes(document.body, true);
     expect(document.body.textContent).toBe('壱 person');
     expect(spans()[0].classList.contains('vocabify-vocabulary')).toBe(true);
     expect(spans()[0].classList.contains('vocabify-kanji')).toBe(false);
@@ -77,17 +77,17 @@ describe('replaceTextNodes', () => {
 });
 
 describe('reverseVocabify and restyle', () => {
-  it('restores the original text', () => {
+  it('restores the original text', async () => {
     document.body.innerHTML = '<p>One person</p>';
-    replaceTextNodes(document.body);
+    await replaceTextNodes(document.body);
     reverseVocabify();
     expect(spans()).toHaveLength(0);
     expect(document.body.textContent).toBe('One person');
   });
 
-  it('switches between styled and unstyled classes', () => {
+  it('switches between styled and unstyled classes', async () => {
     document.body.innerHTML = '<p>one</p>';
-    replaceTextNodes(document.body);
+    await replaceTextNodes(document.body);
     restyle(false);
     expect(spans()[0].className).toBe('vocabify vocabify-kanji-no-style');
     restyle(true);
@@ -104,7 +104,7 @@ describe('observer', () => {
     document.body.appendChild(added);
     (document.getElementById('p')!.firstChild as Text).data = 'person';
     await Promise.resolve(); // let the observer deliver its records
-    flushPending();
+    await flushPending();
     expect(document.body.textContent).toBe('人一');
   });
 
@@ -113,9 +113,9 @@ describe('observer', () => {
     startObserving(document.body);
     document.body.append('one');
     await Promise.resolve();
-    flushPending();
+    await flushPending();
     await Promise.resolve();
-    flushPending();
+    await flushPending();
     expect(spans()).toHaveLength(1);
   });
 });

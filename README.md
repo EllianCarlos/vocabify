@@ -40,7 +40,7 @@ In the popup you can select which subject types and SRS stages to show, and turn
 
 ## What Vocabify does not change
 
-Vocabify does not change text in input fields, text areas, rich-text editors (`contenteditable`), code blocks, scripts and styles. It processes new text on dynamic pages when the browser is idle.
+Vocabify changes only English text. It uses the page's `lang` attributes and the browser's built-in language detector, so it does not replace words such as "do" in "Feira do bairro" on a Portuguese page. It also does not change text in input fields, text areas, rich-text editors (`contenteditable`), code blocks, scripts and styles. It processes new text on dynamic pages when the browser is idle.
 
 ## Privacy
 
