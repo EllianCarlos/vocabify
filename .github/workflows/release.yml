@@ -63,10 +63,30 @@ jobs:
 
       - name: Publish release
         run: |
+          repo="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
+          cat > install.md <<NOTES
+          <!-- vocabify-install -->
+          ## Install
+
+          **Chrome, Edge, Brave:** download [vocabify-chrome.zip]($repo/vocabify-chrome.zip) and unzip it into a folder that you keep. Open \`chrome://extensions\`, turn on **Developer mode**, click **Load unpacked** and select the folder.
+
+          **Firefox:** download [vocabify-firefox.zip]($repo/vocabify-firefox.zip). Open \`about:debugging#/runtime/this-firefox\`, click **Load Temporary Add-on…** and select the zip. Firefox removes it when it closes.
+
+          **Set up:** create a [WaniKani personal access token](https://www.wanikani.com/settings/personal_access_tokens) (read-only is sufficient), click the Vocabify icon, paste the token and reload the page.
+
+          **Update:** replace the folder contents with the new zip and click the reload icon on the extension card.
+          NOTES
+
           files="vocabify-chrome.zip vocabify-firefox.zip"
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG exists; uploading the zips to it."
             gh release upload "$TAG" $files --clobber
+            body=$(gh release view "$TAG" --json body -q .body)
+            if ! grep -q 'vocabify-install' <<<"$body"; then
+              { cat install.md; echo; echo "$body"; } > notes.md
+              gh release edit "$TAG" --notes-file notes.md
+            fi
           else
-            gh release create "$TAG" $files --title "Vocabify $TAG" --generate-notes --verify-tag
+            gh release create "$TAG" $files --title "Vocabify $TAG" \
+              --notes-file install.md --generate-notes --verify-tag
           fi
