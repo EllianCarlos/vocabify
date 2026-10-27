@@ -65,7 +65,7 @@ For the full developer guide, see [CONTRIBUTING](CONTRIBUTING.md).
 2. Commit and push the change.
 3. Push a tag with the same version: `git tag v0.0.3 && git push origin v0.0.3`
 
-The [Release workflow](.github/workflows/release.yml) builds the Chrome and Firefox zips and publishes them on the [releases page](https://github.com/EllianCarlos/vocabify/releases). The install links above always point to the latest release.
+The [Release workflow](.github/workflows/release.yml) builds the Chrome and Firefox zips and publishes them on the [releases page](https://github.com/EllianCarlos/vocabify/releases). It also starts when you publish a release in the GitHub web interface, and you can run it by hand from the **Actions** tab (**Release** → **Run workflow**, then enter the tag). If the release already exists, the workflow adds the zips to it. The install links above always point to the latest release.
 
 ## Future plans
 
