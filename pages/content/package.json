@@ -22,7 +22,8 @@
   "dependencies": {
     "@extension/env": "workspace:*",
     "@extension/shared": "workspace:*",
-    "@extension/storage": "workspace:*"
+    "@extension/storage": "workspace:*",
+    "compromise": "^14"
   },
   "devDependencies": {
     "@extension/hmr": "workspace:*",

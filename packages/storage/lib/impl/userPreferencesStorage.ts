@@ -275,3 +275,12 @@ export const welcomeCompletedStorage = createStorage<boolean>('welcome-completed
   storageEnum: StorageEnum.Local,
   liveUpdate: true,
 });
+
+/**
+ * When an English word has more than one possible translation, use a small
+ * local language model to select the one that fits the sentence.
+ */
+export const wordSenseModelStorage = createStorage<boolean>('word-sense-model-storage', true, {
+  storageEnum: StorageEnum.Sync,
+  liveUpdate: true,
+});
