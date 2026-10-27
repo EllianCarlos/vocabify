@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Lint, type-check and test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write # coverage comment on pull requests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Lint and formatting
+        # `pnpm lint` fixes what it can, so fail if it changed any file.
+        run: |
+          pnpm lint
+          git diff --exit-code || (echo "::error::Run 'pnpm lint' and commit the result." && exit 1)
+
+      # Type-check and tests need the generated workspace packages.
+      - name: Build
+        run: pnpm build
+
+      - name: Type-check
+        run: pnpm type-check
+
+      - name: Unit tests
+        run: pnpm test
+
+      - name: Coverage report
+        if: always() && github.event_name == 'pull_request'
+        uses: davelosert/vitest-coverage-report-action@v2
+
+  build:
+    name: Build ${{ matrix.browser }}
+    needs: check
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        browser: [chrome, firefox]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm ${{ matrix.browser == 'firefox' && 'build:firefox' || 'build' }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vocabify-${{ matrix.browser }}
+          path: dist/
+          if-no-files-found: error

@@ -1,0 +1,49 @@
+name: Release
+
+# Push a tag such as `v0.0.3` to publish a GitHub release with ready-to-install
+# zips for Chrome and Firefox. The tag must match the version in package.json.
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Check tag matches package.json version
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $version. Run 'pnpm update-version <version>' first."
+            exit 1
+          fi
+
+      - name: Build Chrome zip
+        run: |
+          pnpm build
+          pnpm type-check
+          pnpm test
+          (cd dist && zip -qr "$GITHUB_WORKSPACE/vocabify-chrome.zip" .)
+
+      - name: Build Firefox zip
+        run: |
+          pnpm build:firefox
+          (cd dist && zip -qr "$GITHUB_WORKSPACE/vocabify-firefox.zip" .)
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" vocabify-chrome.zip vocabify-firefox.zip \
+            --title "Vocabify $GITHUB_REF_NAME" --generate-notes --verify-tag
