@@ -30,7 +30,11 @@ const manifest = {
   version: packageJson.version,
   description: '__MSG_extensionDescription__',
   host_permissions: ['<all_urls>'],
-  permissions: ['storage', 'alarms', 'unlimitedStorage'],
+  permissions: ['storage', 'alarms', 'unlimitedStorage', 'offscreen'],
+  content_security_policy: {
+    // The word-sense model runs in WebAssembly.
+    extension_pages: "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'",
+  },
   background: {
     service_worker: 'background.js',
     type: 'module',

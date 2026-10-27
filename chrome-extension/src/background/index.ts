@@ -13,6 +13,7 @@ import {
   updateAllWaniKaniAssignments,
   updateVocabToReplace,
 } from '@extension/data-sources';
+import { listenForWordSenseRequests } from './wordSense';
 
 const ASSIGNMENT_ALARM_NAME = 'update-assignment-alarm';
 const VOCAB_ALARM_NAME = 'update-vocabulary-alarm';
@@ -73,3 +74,6 @@ wanikaniApiKeyStorage.subscribe(async () => {
   await updateAllWaniKaniAssignments();
   await updateVocabToReplace();
 });
+
+// Requests from content scripts for the word-sense model.
+listenForWordSenseRequests();
