@@ -3,6 +3,8 @@ import {
   replaceTextNodes,
   restyle,
   reverseVocabify,
+  type SenseRequest,
+  setSenseResolver,
   setVocab,
   startObserving,
   stopObserving,
@@ -13,12 +15,27 @@ import {
   translationSettingsStorage,
   vocabToReplaceStorage,
   wanikaniSubjectStylePreferenceStorage,
+  wordSenseModelStorage,
 } from '@extension/storage';
 
 let active = false;
 
 // The browser's built-in language detector (CLD). It needs no download.
 setLanguageDetector(text => chrome.i18n.detectLanguage(text));
+
+/** Asks the background script, which runs the word-sense model. */
+async function askModel(requests: SenseRequest[]): Promise<(number | null)[]> {
+  const response = (await chrome.runtime.sendMessage({ type: 'vocabify/word-sense', requests })) as
+    | { ok: true; choices: (number | null)[] }
+    | { ok: false; error: string }
+    | undefined;
+  if (!response?.ok) throw new Error(response?.error ?? 'No answer from the word-sense model');
+  return response.choices;
+}
+
+async function loadWordSenseSetting() {
+  setSenseResolver((await wordSenseModelStorage.get()) ? askModel : null);
+}
 
 async function shouldTranslate(): Promise<boolean> {
   const currentDomain = window.location.hostname;
@@ -54,7 +71,7 @@ async function sync(refreshExisting: boolean) {
 }
 
 async function init() {
-  await loadVocab();
+  await Promise.all([loadVocab(), loadWordSenseSetting()]);
   await sync(false);
 }
 
@@ -62,6 +79,10 @@ domainSettingsStorage.subscribe(() => sync(false));
 translationSettingsStorage.subscribe(() => sync(false));
 vocabToReplaceStorage.subscribe(async () => {
   await loadVocab();
+  await sync(true);
+});
+wordSenseModelStorage.subscribe(async () => {
+  await loadWordSenseSetting();
   await sync(true);
 });
 wanikaniSubjectStylePreferenceStorage.subscribe(async () => {

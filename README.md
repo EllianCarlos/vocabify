@@ -42,9 +42,18 @@ In the popup you can select which subject types and SRS stages to show, and turn
 
 Vocabify changes only English text. It uses the page's `lang` attributes and the browser's built-in language detector, so it does not replace words such as "do" in "Feira do bairro" on a Portuguese page. It also does not change text in input fields, text areas, rich-text editors (`contenteditable`), code blocks, scripts and styles. It processes new text on dynamic pages when the browser is idle.
 
+## Correct meaning in context
+
+Some English words have more than one translation. For example, "tip" is 先 in "the tip of the iceberg" but ヒント in "a useful tip". Vocabify selects the translation in two steps:
+
+1. **Part of speech.** Vocabify tags the word in its sentence (noun, verb, ...) and does not use translations that do not fit. "tip" in "Do you tip the waiter?" is a verb, so the nouns 先 and ヒント are not used. Function words such as "do" in "Do you...?" are not replaced by kanji.
+2. **Meaning in context** (setting *Check Meaning in Context*, on by default). If more than one translation is left, a small language model ([all-MiniLM-L6-v2](https://huggingface.co/Xenova/all-MiniLM-L6-v2), 23 MB) compares the sentence with the WaniKani meanings and context sentences of each translation. The model runs on your computer. The word stays in English until the model answers. If the model is not sure, the word stays in English.
+
+The model is downloaded once from Hugging Face, checked with SHA-256, and kept in the browser. If you turn the setting off, Vocabify uses the first translation that fits.
+
 ## Privacy
 
-Vocabify sends your token only to the WaniKani API. All data stays in your browser. See the [privacy policy](Privacy-Policy.md).
+Vocabify sends your token only to the WaniKani API. If *Check Meaning in Context* is on, Vocabify downloads the model files from Hugging Face once; it sends no page text or personal data. All other data stays in your browser. See the [privacy policy](Privacy-Policy.md).
 
 ## Build from source
 

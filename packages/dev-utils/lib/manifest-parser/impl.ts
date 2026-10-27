@@ -28,9 +28,12 @@ const convertToFirefoxCompatibleManifest = (manifest: Manifest) => {
     };
   }
   manifestCopy.content_security_policy = {
-    extension_pages: "script-src 'self'; object-src 'self'",
+    extension_pages: "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'",
   };
-  manifestCopy.permissions = (manifestCopy.permissions as string[]).filter(value => value !== 'sidePanel');
+  manifestCopy.permissions = (manifestCopy.permissions as string[]).filter(
+    // Firefox has no sidePanel or offscreen API; the model runs in the background page.
+    value => value !== 'sidePanel' && value !== 'offscreen',
+  );
 
   delete manifestCopy.options_page;
   delete manifestCopy.side_panel;
