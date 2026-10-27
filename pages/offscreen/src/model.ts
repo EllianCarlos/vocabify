@@ -3,10 +3,13 @@
  * extension's Cache Storage.
  *
  * Model: Xenova/all-MiniLM-L6-v2 (Apache-2.0), quantized ONNX build, 23 MB.
- * The SHA-256 values protect against a changed or damaged download.
+ * The SHA-256 values (checked against the official files) protect against a
+ * damaged download.
  */
 
-const BASE_URL = 'https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/';
+/** Pinned to one commit of the model repository, so the files cannot change. */
+const MODEL_REVISION = '751bff37182d3f1213fa05d7196b954e230abad9';
+const BASE_URL = `https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/${MODEL_REVISION}/`;
 const CACHE_NAME = 'vocabify-word-sense-model-v1';
 
 export const MODEL_FILES = {
